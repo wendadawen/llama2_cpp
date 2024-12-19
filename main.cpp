@@ -17,7 +17,7 @@ struct Config {
     void init(std::fstream &file) {
         file.read(reinterpret_cast<char*>(this), sizeof(Config));
         #ifdef DEBUG
-        std::cout << "Config:"
+        std::cerr << "Config:"
             << "\n\tdim=" << dim
             << "\n\thidden_dim=" << hidden_dim
             << "\n\tn_layers=" << n_layers
@@ -58,8 +58,8 @@ struct Weights {
         token_embedding_table.resize(config.vocab_size, tensor1d(config.dim));
         rms_att_weight.resize(config.n_layers, tensor1d(config.dim));
         wq.resize(config.n_layers, tensor2d(config.dim, tensor1d(config.dim)));
-        wk.resize(config.n_layers, tensor2d(config.dim, tensor1d(config.dim * config.n_kv_heads / config.n_heads)));
-        wv.resize(config.n_layers, tensor2d(config.dim, tensor1d(config.dim * config.n_kv_heads / config.n_heads)));
+        wk.resize(config.n_layers, tensor2d(config.dim * config.n_kv_heads / config.n_heads, tensor1d(config.dim)));
+        wv.resize(config.n_layers, tensor2d(config.dim * config.n_kv_heads / config.n_heads, tensor1d(config.dim)));
         wo.resize(config.n_layers, tensor2d(config.dim, tensor1d(config.dim)));
         rms_ffn_weight.resize(config.n_layers, tensor1d(config.dim));
         w1.resize(config.n_layers, tensor2d(config.hidden_dim, tensor1d(config.dim)));
@@ -87,7 +87,7 @@ struct Weights {
         else wcls = token_embedding_table;
 
         #ifdef DEBUG
-        std::cout << "Weights:"
+        std::cerr << "Weights:"
             << "\n\ttoken_embedding_table=[" << token_embedding_table.size() << ", " << token_embedding_table[0].size() << "]"
             << "\n\trms_att_weight=[" << rms_att_weight.size() << ", " << rms_att_weight[0].size() << "]"
             << "\n\twq=[" << wq.size() << ", " << wq[0].size() << ", " << wq[0][0].size() << "]"
@@ -116,7 +116,7 @@ struct Tokenizer {
         vocab_scores.resize(config.vocab_size);
         sorted_vocab.resize(config.vocab_size);
         file.read(reinterpret_cast<char*>(&max_token_length), sizeof(int));
-        // std::cout << "max_token_length=" << max_token_length << std::endl;
+        // std::cerr << "max_token_length=" << max_token_length << std::endl;
         for (int i = 0; i < config.vocab_size; i++) {
             int len;
             file.read(reinterpret_cast<char*>(&vocab_scores[i]), sizeof(float));
@@ -128,14 +128,14 @@ struct Tokenizer {
                 vocab[i].push_back(c);
             }
             sorted_vocab[i] = {i, vocab[i]};
-            // std::cout << "vocab_scores[" << i << "]=" << vocab_scores[i] << " len=" << len << " vocab[" << i << "]=" << vocab[i] << std::endl;
+            // std::cerr << "vocab_scores[" << i << "]=" << vocab_scores[i] << " len=" << len << " vocab[" << i << "]=" << vocab[i] << std::endl;
         }
         std::sort(sorted_vocab.begin(), sorted_vocab.end(), [&](const auto &a, const auto &b) {
             return a.second < b.second;
         });
 
         #ifdef DEBUG
-        std::cout << "Tokenizer:"
+        std::cerr << "Tokenizer:"
             << "\n\tmax_token_length=" << max_token_length
             << "\n\tvocab_scores=[" << vocab_scores.size() << "]"
             << "\n\tvocab=[" << vocab.size() << "]"
@@ -151,10 +151,10 @@ struct RunState {
     tensor1d hb;  // [hidden_dim]
     tensor1d hb2;  // [hidden_dim]
     tensor1d q;  // [dim]
-    tensor1d k;  // [dim]
-    tensor1d v;  // [dim]
-    tensor3d key_cache;  // [layer, seq_len, dim]
-    tensor3d value_cache;  // [layer, seq_len, dim]
+    tensor1d k;  // [kv_dim]
+    tensor1d v;  // [kv_dim]
+    tensor3d key_cache;  // [layer, seq_len, kv_dim]
+    tensor3d value_cache;  // [layer, seq_len, kv_dim]
     tensor1d attention;  // [seq_len]
     tensor1d logits;  // [vocab_size]
 
@@ -165,12 +165,27 @@ struct RunState {
         hb.resize(config.hidden_dim);
         hb2.resize(config.hidden_dim);
         q.resize(config.dim);
-        k.resize(config.dim);
-        v.resize(config.dim);
-        key_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim)));
-        value_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim)));
+        k.resize(config.dim * config.n_kv_heads / config.n_heads);
+        v.resize(config.dim * config.n_kv_heads / config.n_heads);
+        key_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim * config.n_kv_heads / config.n_heads)));
+        value_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim * config.n_kv_heads / config.n_heads)));
         attention.resize(config.seq_len);
         logits.resize(config.vocab_size);
+        #ifdef DEBUG
+        std::cerr << "RunState:"
+            << "\n\tx=[" << x.size() << "]"
+            << "\n\txb=[" << xb.size() << "]"
+            << "\n\txb2=[" << xb2.size() << "]"
+            << "\n\thb=[" << hb.size() << "]"
+            << "\n\thb2=[" << hb2.size() << "]"
+            << "\n\tq=[" << q.size() << "]"
+            << "\n\tk=[" << k.size() << "]"
+            << "\n\tv=[" << v.size() << "]"
+            << "\n\tkey_cache=[" << key_cache.size() << ", " << key_cache[0].size() << ", " << key_cache[0][0].size() << "]"
+            << "\n\tvalue_cache=[" << value_cache.size() << ", " << value_cache[0].size() << ", " << value_cache[0][0].size() << "]"
+            << "\n\tattention=[" << attention.size() << "]"
+            << "\n\tlogits=[" << logits.size() << "]" << std::endl;
+        #endif
     }
 };
 
@@ -183,7 +198,7 @@ struct Transformer {
     float temperature;
     int steps;
     float topp;
-    unsigned long long rng_state;
+    unsigned long long rng_seed;
 };
 
 void softmax(tensor1d &output, tensor1d &input, int n = -1) {
@@ -235,7 +250,7 @@ int sample_topp(tensor1d &logits, float topp, float coin) {
     float cumulative_prob = 0.0f;
     for(int i = 0; i < logits.size(); i ++) {
         cumulative_prob += logits[ids[i]];
-        if(cumulative_prob >= topp) {
+        if(cumulative_prob > topp) {
             last_idx = i;
             break;
         }
@@ -260,7 +275,7 @@ int sample(Transformer &transformer) {
             transformer.state.logits[q] /= transformer.temperature;
         }
         softmax(transformer.state.logits, transformer.state.logits);
-        float coin = random_f32(transformer.rng_state);
+        float coin = random_f32(transformer.rng_seed);
         if(transformer.topp <= 0 || transformer.topp >= 1) {
             next = sample_mult(transformer.state.logits, coin);
         } else {
@@ -277,9 +292,9 @@ void rmsnorm(tensor1d &output, tensor1d &input, tensor1d &weight) {
         rms += input[i] * input[i];
     }
     rms = rms / n + EPS;
-    rms = 1 / sqrt(rms);
+    rms = 1.0f / sqrt(rms);
     for(int i = 0; i < n; i ++) {
-        output[i] = (input[i] * rms) * weight[i];
+        output[i] = weight[i] * (rms * input[i]);
     }
 }
 
@@ -298,16 +313,18 @@ void rope(RunState &state, int pos, Config &config, tensor2d &freq_cis_real, ten
     for (int head = 0; head < config.n_heads; ++head) {
         int start = head * head_size;
         for (int i = 0; i < head_size; i += 2) {
-            float q0 = state.q[start + i];
-            float q1 = state.q[start + i + 1];
-            float k0 = state.k[start + i];
-            float k1 = state.k[start + i + 1];
             float fcr = freq_cis_real[pos][i / 2];
             float fci = freq_cis_imag[pos][i / 2];
+            float q0 = state.q[start + i];
+            float q1 = state.q[start + i + 1];
             state.q[start + i]     = q0 * fcr - q1 * fci;
             state.q[start + i + 1] = q0 * fci + q1 * fcr;
-            state.k[start + i]     = k0 * fcr - k1 * fci;
-            state.k[start + i + 1] = k0 * fci + k1 * fcr;
+            if(start + i < state.k.size()) {
+                float k0 = state.k[start + i];
+                float k1 = state.k[start + i + 1];
+                state.k[start + i]     = k0 * fcr - k1 * fci;
+                state.k[start + i + 1] = k0 * fci + k1 * fcr;
+            }
         }
     }
 }
@@ -324,6 +341,7 @@ void forward(Transformer &transformer, int token, int pos) {
     RunState &state = transformer.state;
     Tokenizer &tokenizer = transformer.tokenizer;
     int head_size = config.dim / config.n_heads;
+    int kv_mul = config.n_heads / config.n_kv_heads;
 
     state.x = weights.token_embedding_table[token];
     for(int layer = 0; layer < config.n_layers; ++ layer) {
@@ -336,11 +354,12 @@ void forward(Transformer &transformer, int token, int pos) {
         state.value_cache[layer][pos] = state.v;
         memset(state.xb.data(), 0, state.xb.size() * sizeof(float));
         for(int head = 0; head < config.n_heads; ++ head) {
-            int offest = head * head_size;
+            int offest1 = head * head_size;
+            int offest2 = head / kv_mul * head_size;
             for(int step = 0; step <= pos; ++ step) {
                 float score = 0;
                 for(int i = 0; i < head_size; ++ i) {
-                    score += state.q[offest + i] * state.key_cache[layer][step][offest + i];
+                    score += state.q[offest1 + i] * state.key_cache[layer][step][offest2 + i];
                 }
                 score /= sqrt(head_size * 1.0);
                 state.attention[step] = score;
@@ -349,7 +368,7 @@ void forward(Transformer &transformer, int token, int pos) {
             for(int step = 0; step <= pos; ++ step) {
                 float a = state.attention[step];
                 for(int i = 0; i < head_size; ++ i) {
-                    state.xb[offest + i] += a * state.value_cache[layer][step][offest + i];
+                    state.xb[offest1 + i] += a * state.value_cache[layer][step][offest2 + i];
                 }
             }
         }
@@ -367,6 +386,27 @@ void forward(Transformer &transformer, int token, int pos) {
     matmul(state.logits, state.x, weights.wcls);
 }
 
+std::string decode(Tokenizer &t, int prev_token, int token) {
+    std::string piece = t.vocab[token];
+    if (prev_token == 1 && piece[0] == ' ') piece = piece.substr(1);
+    unsigned char byte_val;
+    if (sscanf(piece.c_str(), "<0x%02hhX>", &byte_val) == 1) {
+        piece = (char)byte_val;
+    }
+    return piece;
+}
+
+void safe_cout(const std::string& piece) {
+    if (piece.empty()) { return; }
+    if (piece.size() == 1) {
+        unsigned char byte_val = piece[0];
+        if (!(std::isprint(byte_val) || std::isspace(byte_val))) {
+            return;
+        }
+    }
+    std::cout << piece;
+}
+
 void generate(Transformer &transformer) {
     int next;
     int token = 1;  // BOS = 1, EOS = 2
@@ -374,9 +414,25 @@ void generate(Transformer &transformer) {
         forward(transformer, token, pos);
         next = sample(transformer);
         if(next == 1) break;  // BOS
-        std::cout << transformer.tokenizer.vocab[next];
+        safe_cout(decode(transformer.tokenizer, token, next));
         token = next;
     }
+    std::cout << std::endl;
+}
+
+void error_usage() {
+    fprintf(stderr, "Usage:   main <checkpoint> [options]\n");
+    fprintf(stderr, "Example: main model.bin -n 256 -i \"Once upon a time\"\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
+    fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
+    fprintf(stderr, "  -s <int>    random seed, default time(NULL)\n");
+    fprintf(stderr, "  -n <int>    number of steps to run for, default 256. 0 = max_seq_len\n");
+    fprintf(stderr, "  -i <string> input prompt\n");
+    fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
+    fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
+    fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
+    exit(EXIT_FAILURE);
 }
 
 int main(int argc, char** argv) {
@@ -387,17 +443,38 @@ int main(int argc, char** argv) {
     // wcls根据shared_weights是否为true来决定是否和token_embedding_table共享内存，shared_weights根据vocab_size是否为正数来决定是否为true
     std::string checkpoint_path = "d:/project/llama2_cpp/model/stories15M.bin";
     std::string tokenizer_path = "d:/project/llama2_cpp/model/tokenizer.bin";
+    
     float temperature = 1.0; // t = 0, greedy; t = 1.0, sampling; t > 1.0, sampling with more randomness
     int steps = 256;  // 生成的token数量
     float topp = 0.9;  // top-p sampling
-    unsigned long long rng_state = (unsigned int)time(NULL);
+    unsigned long long rng_seed = (unsigned int)time(NULL);
+    std::string prompt = "";
+    std::string mode = "generate";
+    std::string system_prompt = "";
+
+    if (argc >= 2) { checkpoint_path = "d:/project/llama2_cpp/model/" + std::string(argv[1]); } 
+    else if (argc == 1){} 
+    else { error_usage(); }
+    for (int i = 2; i < argc; i+=2) {
+        if (i + 1 >= argc) { error_usage(); }
+        if (argv[i][0] != '-') { error_usage(); }
+        if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); }
+        else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
+        else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'n') { steps = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'i') { prompt = argv[i + 1]; }
+        else if (argv[i][1] == 'z') { tokenizer_path = "d:/project/llama2_cpp/model/"+std::string(argv[i + 1]); }
+        else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
+        else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
+        else { error_usage(); }
+    }
 
     Config config;
     Weights weights;
     {
         std::fstream file(checkpoint_path, std::ios::in | std::ios::out | std::ios::binary);
         if(!file) {
-            std::cout << "Checkpoint File not found!" << std::endl;
+            std::cerr << "Checkpoint File not found!" << std::endl;
             return 0;
         }
         config.init(file);
@@ -410,7 +487,7 @@ int main(int argc, char** argv) {
     {
         std::fstream file(tokenizer_path, std::ios::in | std::ios::out | std::ios::binary);
         if(!file) {
-            std::cout << "Tokenizer File not found!" << std::endl;
+            std::cerr << "Tokenizer File not found!" << std::endl;
             return 0;
         }
         tokenizer.init(config, file);
@@ -420,7 +497,14 @@ int main(int argc, char** argv) {
     RunState state; 
     state.init(config);
 
-    Transformer transformer = {config, weights, tokenizer, state, temperature, steps, topp, rng_state};
+    Transformer transformer = {config, weights, tokenizer, state, temperature, steps, topp, rng_seed};
+    #ifdef DEBUG
+    std::cerr << "Transformer:"
+        << "\n\ttemperature=" << temperature
+        << "\n\tsteps=" << steps
+        << "\n\ttopp=" << topp
+        << "\n\trng_seed=" << rng_seed << std::endl;
+    #endif
     generate(transformer);
 
     return 0;
