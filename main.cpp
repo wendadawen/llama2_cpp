@@ -1,5 +1,6 @@
 #include <bits/stdc++.h>
 #define DEBUG
+#define EPS 1e-5
 
 typedef std::vector<float> tensor1d;
 typedef std::vector<tensor1d> tensor2d;
@@ -142,6 +143,128 @@ struct Tokenizer {
     }
 };
 
+struct RunState {
+
+    tensor1d logits;
+
+    void init(Config &config) {
+        logits.resize(config.vocab_size);
+    }
+};
+
+struct Transformer {
+    Config config;
+    Weights weights;
+    Tokenizer tokenizer;
+    RunState state;
+
+    float temperature;
+    int steps;
+    float topp;
+    unsigned long long rng_state;
+};
+
+void softmax(tensor1d &output, tensor1d &input) {
+    float max_val = *std::max_element(input.begin(), input.end());
+    float sum = 0;
+    for(int i = 0; i < input.size(); i ++) {
+        output[i] = exp(input[i] - max_val);
+        sum += output[i];
+    }
+    for(int i = 0; i < input.size(); i ++) {
+        output[i] /= sum;
+    }
+}
+
+unsigned int random_u32(unsigned long long &state) {
+    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return (state * 0x2545F4914F6CDD1Dull) >> 32;
+}
+float random_f32(unsigned long long &state) { // random float32 in [0,1)
+    return (random_u32(state) >> 8) / 16777216.0f;
+}
+
+int argmax(tensor1d &logits) {
+    return std::max_element(logits.begin(), logits.end()) - logits.begin();
+}
+
+int sample_mult(tensor1d &logits, float coin) {
+    float cdf = 0.0f;
+    for(int i = 0; i < logits.size(); i ++) {
+        cdf += logits[i];
+        if(coin < cdf) {
+            return i;
+        }
+    }
+    return logits.size() - 1;
+}
+
+int sample_topp(tensor1d &logits, float topp, float coin) {
+    std::vector<int> ids(logits.size());
+    std::iota(ids.begin(), ids.end(), 0);
+    std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) {
+        return logits[a] > logits[b];
+    });
+    int last_idx = 0;
+    float cumulative_prob = 0.0f;
+    for(int i = 0; i < logits.size(); i ++) {
+        cumulative_prob += logits[ids[i]];
+        if(cumulative_prob >= topp) {
+            last_idx = i;
+            break;
+        }
+    }
+    float r = coin * cumulative_prob;
+    float cdf = 0.0f;
+    for(int i = 0; i <= last_idx; i ++) {
+        cdf += logits[ids[i]];
+        if(r < cdf) {
+            return ids[i];
+        }
+    }
+    return ids[last_idx];
+}
+
+int sample(Transformer &transformer) {
+    int next;
+    if(transformer.temperature < EPS) {
+        next = argmax(transformer.state.logits);
+    } else {
+        for(int q = 0; q < transformer.config.vocab_size; q ++) {
+            transformer.state.logits[q] /= transformer.temperature;
+        }
+        softmax(transformer.state.logits, transformer.state.logits);
+        float coin = random_f32(transformer.rng_state);
+        if(transformer.topp <= 0 || transformer.topp >= 1) {
+            next = sample_mult(transformer.state.logits, coin);
+        } else {
+            next = sample_topp(transformer.state.logits, transformer.topp, coin);
+        }
+    }
+    return next;
+}
+
+void forward(Transformer &transformer, int token, int pos) {
+    Config &config = transformer.config;
+    Weights &weights = transformer.weights;
+    RunState &state = transformer.state;
+    Tokenizer &tokenizer = transformer.tokenizer;
+}
+
+void generate(Transformer &transformer) {
+    int next;
+    int token = 1;  // BOS = 1, EOS = 2
+    for(int pos = 0; pos < transformer.steps; pos ++) {
+        forward(transformer, token, pos);
+        next = sample(transformer);
+        std::cout << transformer.tokenizer.vocab[next];
+        token = next;
+    }
+}
+
 int main(int argc, char** argv) {
 
     // 读取checkpoint(stories15M.bin)：Config token_embedding_table rms_att_weight wq wk wv wo rms_ffn_weight w1 w2 w3 rms_final_weight freq_cis_real freq_cis_imag wcls
@@ -150,6 +273,10 @@ int main(int argc, char** argv) {
     // wcls根据shared_weights是否为true来决定是否和token_embedding_table共享内存，shared_weights根据vocab_size是否为正数来决定是否为true
     std::string checkpoint_path = "d:/project/llama2_cpp/model/stories15M.bin";
     std::string tokenizer_path = "d:/project/llama2_cpp/model/tokenizer.bin";
+    float temperature = 1.0; // t = 0, greedy; t = 1.0, sampling; t > 1.0, sampling with more randomness
+    int steps = 256;  // 生成的token数量
+    float topp = 0.9;  // top-p sampling
+    unsigned long long rng_state = (unsigned int)time(NULL);
 
     Config config;
     Weights weights;
@@ -175,6 +302,12 @@ int main(int argc, char** argv) {
         tokenizer.init(config, file);
         file.close();
     }
+
+    RunState state; 
+    state.init(config);
+
+    Transformer transformer = {config, weights, tokenizer, state, temperature, steps, topp, rng_state};
+    generate(transformer);
 
     return 0;
 }
