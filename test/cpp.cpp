@@ -3,8 +3,8 @@ using namespace std;
 
 
 int main() {
-    vector<int> v;
-    v.resize(10);
-    v[10] = 1;
+    string s = "你好";
+    cout << s << endl;
+    cout << s.size() << endl;
     return 0;
 }

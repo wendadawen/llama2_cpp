@@ -116,7 +116,6 @@ struct Tokenizer {
         vocab_scores.resize(config.vocab_size);
         sorted_vocab.resize(config.vocab_size);
         file.read(reinterpret_cast<char*>(&max_token_length), sizeof(int));
-        // std::cerr << "max_token_length=" << max_token_length << std::endl;
         for (int i = 0; i < config.vocab_size; i++) {
             int len;
             file.read(reinterpret_cast<char*>(&vocab_scores[i]), sizeof(float));
@@ -128,7 +127,6 @@ struct Tokenizer {
                 vocab[i].push_back(c);
             }
             sorted_vocab[i] = {i, vocab[i]};
-            // std::cerr << "vocab_scores[" << i << "]=" << vocab_scores[i] << " len=" << len << " vocab[" << i << "]=" << vocab[i] << std::endl;
         }
         std::sort(sorted_vocab.begin(), sorted_vocab.end(), [&](const auto &a, const auto &b) {
             return a.second < b.second;
@@ -199,6 +197,7 @@ struct Transformer {
     int steps;
     float topp;
     unsigned long long rng_seed;
+    std::string prompt;
 };
 
 void softmax(tensor1d &output, tensor1d &input, int n = -1) {
@@ -386,6 +385,71 @@ void forward(Transformer &transformer, int token, int pos) {
     matmul(state.logits, state.x, weights.wcls);
 }
 
+int str_lookup(const std::string &str, const std::vector<std::pair<int, std::string>> &sorted_vocab) {
+    std::pair<int, std::string> key = {-1, str};
+    auto it = std::lower_bound(sorted_vocab.begin(), sorted_vocab.end(), key, [&](const auto &a, const auto &b) {
+        return a.second < b.second;
+    });
+    if (it != sorted_vocab.end() && it->second == str) {
+        return it->first;
+    }
+    return -1;
+}
+
+std::vector<int> encode(Tokenizer &t, const std::string &text, bool bos, bool eos) {
+    std::vector<int> tokens;
+    if (bos) tokens.push_back(1); // BOS token
+    if (text.empty()) return tokens;
+    else {
+        int dummy_prefix = str_lookup(" ", t.sorted_vocab);
+        tokens.push_back(dummy_prefix);
+    }
+    // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
+    // U+0000	U+007F	    0xxxxxxx
+    // U+0080	U+07FF	    110xxxxx	10xxxxxx
+    // U+0800	U+FFFF	    1110xxxx	10xxxxxx	10xxxxxx
+    // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
+    std::string str_buffer;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        // 0xC0 is 11000000
+        // 0x80 is 10000000
+        if ((c & 0xC0) != 0x80) str_buffer.clear();
+        str_buffer.push_back(c);
+        // 如果下一个字符是延续字节，继续读取
+        if (i + 1 < text.size() && (text[i + 1] & 0xC0) == 0x80 && str_buffer.size() < 4) {
+            continue;
+        }
+        int id = str_lookup(str_buffer, t.sorted_vocab);
+        if (id != -1) {
+            tokens.push_back(id);
+        } else {
+            for (char ch : str_buffer) tokens.push_back(static_cast<unsigned char>(ch) + 3);
+        }
+        str_buffer.clear();
+    }
+    // 合并最佳连续对
+    while (true) {
+        float best_score = -1e10f;
+        int best_id = -1;
+        size_t best_idx = -1;
+        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+            std::string merged_str = t.vocab[tokens[i]] + t.vocab[tokens[i + 1]];
+            int id = str_lookup(merged_str, t.sorted_vocab);
+            if (id != -1 && t.vocab_scores[id] > best_score) {
+                best_score = t.vocab_scores[id];
+                best_id = id;
+                best_idx = i;
+            }
+        }
+        if (best_idx == static_cast<size_t>(-1)) break;
+        tokens[best_idx] = best_id;
+        tokens.erase(tokens.begin() + best_idx + 1);
+    }
+    if (eos) tokens.push_back(2);
+    return tokens;
+}
+
 std::string decode(Tokenizer &t, int prev_token, int token) {
     std::string piece = t.vocab[token];
     if (prev_token == 1 && piece[0] == ' ') piece = piece.substr(1);
@@ -408,11 +472,20 @@ void safe_cout(const std::string& piece) {
 }
 
 void generate(Transformer &transformer) {
+    std::vector<int> prompt_tokens = encode(transformer.tokenizer, transformer.prompt, 1, 0);
+    if (prompt_tokens.size() < 1) {
+        std::cerr << "something is wrong, expected at least 1 prompt token" << std::endl;
+        exit(EXIT_FAILURE);
+    }
     int next;
-    int token = 1;  // BOS = 1, EOS = 2
+    int token = prompt_tokens[0];  // BOS = 1, EOS = 2
     for(int pos = 0; pos < transformer.steps; pos ++) {
         forward(transformer, token, pos);
-        next = sample(transformer);
+        if (pos < prompt_tokens.size() - 1) {
+            next = prompt_tokens[pos + 1];
+        } else {
+            next = sample(transformer);
+        }
         if(next == 1) break;  // BOS
         safe_cout(decode(transformer.tokenizer, token, next));
         token = next;
@@ -497,13 +570,14 @@ int main(int argc, char** argv) {
     RunState state; 
     state.init(config);
 
-    Transformer transformer = {config, weights, tokenizer, state, temperature, steps, topp, rng_seed};
+    Transformer transformer = {config, weights, tokenizer, state, temperature, steps, topp, rng_seed, prompt};
     #ifdef DEBUG
     std::cerr << "Transformer:"
         << "\n\ttemperature=" << temperature
         << "\n\tsteps=" << steps
         << "\n\ttopp=" << topp
-        << "\n\trng_seed=" << rng_seed << std::endl;
+        << "\n\trng_seed=" << rng_seed
+        << "\n\tprompt=" << prompt << std::endl;
     #endif
     generate(transformer);
 
