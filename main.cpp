@@ -32,16 +32,17 @@ struct Config {
 struct Weights {
     tensor2d token_embedding_table;  // [vocab_size, dim]
     tensor2d rms_att_weight;  // [layer, dim]
+    // 值得注意的是，这里的weight的存储是转置的（如wk应该是[dim, kv_dim]），详情参考pytorch的Linear层的权重存储
     tensor3d wq; // [layer, dim, dim]
-    tensor3d wk; // [layer, dim, kv_dim], where kv_dim = dim * n_kv_heads / n_heads
-    tensor3d wv; // [layer, dim, kv_dim]
+    tensor3d wk; // [layer, kv_dim, dim], where kv_dim = dim*n_kv_heads/n_heads
+    tensor3d wv; // [layer, kv_dim, dim]
     tensor3d wo; // [layer, dim, dim]
     tensor2d rms_ffn_weight;  // [layer, dim]
     tensor3d w1; // [layer, hidden_dim, dim]
     tensor3d w2; // [layer, dim, hidden_dim]
     tensor3d w3; // [layer, hidden_dim, dim]
     tensor1d rms_final_weight;  // [dim]
-    tensor2d freq_cis_real;  // [seq_len, head_size/2], where head_size = dim / n_heads
+    tensor2d freq_cis_real;  // [seq_len, head_size/2], where head_size=dim/n_heads
     tensor2d freq_cis_imag;  // [seq_len, head_size/2]
     tensor2d wcls;  // [vocab_size, dim]
     void read_weight(tensor1d &tensor, std::fstream &file) {
@@ -144,10 +145,31 @@ struct Tokenizer {
 };
 
 struct RunState {
-
-    tensor1d logits;
+    tensor1d x;  // [dim]
+    tensor1d xb;  // [dim]
+    tensor1d xb2;  // [dim]
+    tensor1d hb;  // [hidden_dim]
+    tensor1d hb2;  // [hidden_dim]
+    tensor1d q;  // [dim]
+    tensor1d k;  // [dim]
+    tensor1d v;  // [dim]
+    tensor3d key_cache;  // [layer, seq_len, dim]
+    tensor3d value_cache;  // [layer, seq_len, dim]
+    tensor1d attention;  // [seq_len]
+    tensor1d logits;  // [vocab_size]
 
     void init(Config &config) {
+        x.resize(config.dim);
+        xb.resize(config.dim);
+        xb2.resize(config.dim);
+        hb.resize(config.hidden_dim);
+        hb2.resize(config.hidden_dim);
+        q.resize(config.dim);
+        k.resize(config.dim);
+        v.resize(config.dim);
+        key_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim)));
+        value_cache.resize(config.n_layers, tensor2d(config.seq_len, tensor1d(config.dim)));
+        attention.resize(config.seq_len);
         logits.resize(config.vocab_size);
     }
 };
@@ -164,14 +186,15 @@ struct Transformer {
     unsigned long long rng_state;
 };
 
-void softmax(tensor1d &output, tensor1d &input) {
-    float max_val = *std::max_element(input.begin(), input.end());
+void softmax(tensor1d &output, tensor1d &input, int n = -1) {
+    if(n < 0) n = input.size();
+    float max_val = *std::max_element(input.begin(), input.begin() + n);
     float sum = 0;
-    for(int i = 0; i < input.size(); i ++) {
+    for(int i = 0; i < n; i ++) {
         output[i] = exp(input[i] - max_val);
         sum += output[i];
     }
-    for(int i = 0; i < input.size(); i ++) {
+    for(int i = 0; i < n; i ++) {
         output[i] /= sum;
     }
 }
@@ -247,11 +270,101 @@ int sample(Transformer &transformer) {
     return next;
 }
 
+void rmsnorm(tensor1d &output, tensor1d &input, tensor1d &weight) {
+    float rms = 0.0f;
+    int n = input.size();
+    for(int i = 0; i < n; i ++) {
+        rms += input[i] * input[i];
+    }
+    rms = rms / n + EPS;
+    rms = 1 / sqrt(rms);
+    for(int i = 0; i < n; i ++) {
+        output[i] = (input[i] * rms) * weight[i];
+    }
+}
+
+void matmul(tensor1d &output, tensor1d &input, tensor2d &weight) {
+    // output = input[dim] * weight[dim, dim/kv_dim]
+    for(int i = 0; i < output.size(); i ++) {
+        output[i] = 0;
+        for(int j = 0; j < input.size(); j ++) {
+            output[i] += input[j] * weight[i][j];
+        }
+    }
+}
+
+void rope(RunState &state, int pos, Config &config, tensor2d &freq_cis_real, tensor2d &freq_cis_imag) {
+    int head_size = config.dim / config.n_heads;
+    for (int head = 0; head < config.n_heads; ++head) {
+        int start = head * head_size;
+        for (int i = 0; i < head_size; i += 2) {
+            float q0 = state.q[start + i];
+            float q1 = state.q[start + i + 1];
+            float k0 = state.k[start + i];
+            float k1 = state.k[start + i + 1];
+            float fcr = freq_cis_real[pos][i / 2];
+            float fci = freq_cis_imag[pos][i / 2];
+            state.q[start + i]     = q0 * fcr - q1 * fci;
+            state.q[start + i + 1] = q0 * fci + q1 * fcr;
+            state.k[start + i]     = k0 * fcr - k1 * fci;
+            state.k[start + i + 1] = k0 * fci + k1 * fcr;
+        }
+    }
+}
+
+void accumulate(tensor1d &output, tensor1d &input) {
+    for(int i = 0; i < output.size(); i ++) {
+        output[i] += input[i];
+    }
+}
+
 void forward(Transformer &transformer, int token, int pos) {
     Config &config = transformer.config;
     Weights &weights = transformer.weights;
     RunState &state = transformer.state;
     Tokenizer &tokenizer = transformer.tokenizer;
+    int head_size = config.dim / config.n_heads;
+
+    state.x = weights.token_embedding_table[token];
+    for(int layer = 0; layer < config.n_layers; ++ layer) {
+        rmsnorm(state.xb, state.x, weights.rms_att_weight[layer]);
+        matmul(state.q, state.xb, weights.wq[layer]);
+        matmul(state.k, state.xb, weights.wk[layer]);
+        matmul(state.v, state.xb, weights.wv[layer]);
+        rope(state, pos, config, weights.freq_cis_real, weights.freq_cis_imag);
+        state.key_cache[layer][pos] = state.k;
+        state.value_cache[layer][pos] = state.v;
+        memset(state.xb.data(), 0, state.xb.size() * sizeof(float));
+        for(int head = 0; head < config.n_heads; ++ head) {
+            int offest = head * head_size;
+            for(int step = 0; step <= pos; ++ step) {
+                float score = 0;
+                for(int i = 0; i < head_size; ++ i) {
+                    score += state.q[offest + i] * state.key_cache[layer][step][offest + i];
+                }
+                score /= sqrt(head_size * 1.0);
+                state.attention[step] = score;
+            }
+            softmax(state.attention, state.attention, pos+1);
+            for(int step = 0; step <= pos; ++ step) {
+                float a = state.attention[step];
+                for(int i = 0; i < head_size; ++ i) {
+                    state.xb[offest + i] += a * state.value_cache[layer][step][offest + i];
+                }
+            }
+        }
+        matmul(state.xb2, state.xb, weights.wo[layer]);
+        accumulate(state.x, state.xb2);
+        rmsnorm(state.xb, state.x, weights.rms_ffn_weight[layer]);
+        matmul(state.hb, state.xb, weights.w1[layer]);
+        matmul(state.hb2, state.xb, weights.w3[layer]);
+        for (int i = 0; i < config.hidden_dim; ++i)
+            state.hb[i] = state.hb[i] * (1.0 / (1.0 + std::exp(-state.hb[i]))) * state.hb2[i];
+        matmul(state.xb, state.hb, weights.w2[layer]);
+        accumulate(state.x, state.xb);
+    }
+    rmsnorm(state.x, state.x, weights.rms_final_weight);
+    matmul(state.logits, state.x, weights.wcls);
 }
 
 void generate(Transformer &transformer) {
@@ -260,6 +373,7 @@ void generate(Transformer &transformer) {
     for(int pos = 0; pos < transformer.steps; pos ++) {
         forward(transformer, token, pos);
         next = sample(transformer);
+        if(next == 1) break;  // BOS
         std::cout << transformer.tokenizer.vocab[next];
         token = next;
     }

@@ -18,4 +18,4 @@ def print_json_keys(file_path):
             print(f"Unsupported JSON structure: {type(data).__name__}")
 
 # 示例调用
-print_json_keys('d:/project/llama2.c/data/data00.json')
+print_json_keys('d:/project/llama2_cpp/data/data00.json')
