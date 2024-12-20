@@ -10,18 +10,36 @@ expected_stdout = b'Once upon a time, there was a little girl named Lily. She lo
 # -----------------------------------------------------------------------------
 # actual tests
 
-def test_main():
+def test_go():
     """ Forwards a model against a known-good desired outcome in run.c for 200 steps"""
 
     model_path = os.path.join("stories260K.bin")
     tokenizer_path = os.path.join("tok512.bin")
     command = ["./go.exe", model_path, "-z", tokenizer_path, "-t", "0.0", "-n", "200"]
-    with open('./test/stderr.txt', mode='wb') as fe:
-        with open('./test/stdout.txt', mode='wb') as fo:
+    with open('./test/stderrgo.txt', mode='wb') as fe:
+        with open('./test/stdoutgo.txt', mode='wb') as fo:
             proc = subprocess.Popen(command, stdout=fo, stderr=fe)  #pipe in windows terminal does funny things like replacing \n with \r\n
             proc.wait()
 
-    with open('stdout.txt', mode='r') as f:
+    with open('./test/stdoutgo.txt', mode='r') as f:
+        stdout = f.read()
+    # strip the very last \n that is added by run.c for aesthetic reasons
+    stdout = stdout[:-1].encode('ascii')
+
+    assert stdout == expected_stdout
+
+def test_goq():
+    """ Forwards a model against a known-good desired outcome in run.c for 200 steps"""
+
+    model_path = os.path.join("stories260Kq.bin")
+    tokenizer_path = os.path.join("tok512.bin")
+    command = ["./goq.exe", model_path, "-z", tokenizer_path, "-t", "0.0", "-n", "200"]
+    with open('./test/stderrgoq.txt', mode='wb') as fe:
+        with open('./test/stdoutgoq.txt', mode='wb') as fo:
+            proc = subprocess.Popen(command, stdout=fo, stderr=fe)  #pipe in windows terminal does funny things like replacing \n with \r\n
+            proc.wait()
+
+    with open('./test/stdoutgoq.txt', mode='r') as f:
         stdout = f.read()
     # strip the very last \n that is added by run.c for aesthetic reasons
     stdout = stdout[:-1].encode('ascii')
